@@ -1,0 +1,165 @@
+model ModelName
+  options noimplicit
+  uses "mmxprs"
+  ! uses "mminsight" ! uncomment this line for an Xpress Insight model
+
+!!!!!!!!!!!!!!!DECLARATIONS!!!!!!!!!!!!!!!
+  public declarations
+    !Ranges declaration
+    TIME = 1..50
+    PO = 1..3
+    MACHINE = 1..3
+    MACHINE_CONVERTER = [1]
+    MACHINE_BUFFER = [2]
+    MACHINE_PACKING = [3]
+    POD = 1..2
+    POD_TYPE : set of string
+    POs_PODTYPE_1 : array(1..2) of integer
+    POs_PODTYPE_2 : array(1..1) of integer
+
+
+    !Variables declaration
+    ST : array(PO,MACHINE) of mpvar
+    ET : array(PO,MACHINE) of mpvar
+    S : array(TIME,PO,MACHINE) of mpvar
+    E : array(TIME,PO,MACHINE) of mpvar
+    Z : array(TIME,PO,MACHINE) of mpvar
+    Y  : array(PO,MACHINE) of mpvar
+    I : array(TIME,POD) of mpvar
+    SUCC : array(PO,PO,MACHINE) of mpvar
+    SL : array(TIME,POD) of mpvar
+
+    !Values declaration
+    DUR :  array(PO,MACHINE) of integer
+    CHNG : array(PO,PO,MACHINE) of integer
+    PO_QUANTITY : array(PO) of integer
+    Objective:linctr
+  end-declarations
+
+  POs_PODTYPE_1 ::[1,2]
+  POs_PODTYPE_2 ::[3]
+
+  !Initialize variable types
+  forall(p in PO, m in MACHINE) Y(p,m) is_binary
+  forall(p in PO, pt in PO, m in MACHINE) SUCC(p,pt,m) is_binary
+  forall(p in PO, t in TIME, m in MACHINE) S(t,p,m) is_binary
+  forall(p in PO, t in TIME, m in MACHINE) E(t,p,m) is_binary
+  forall(p in POD, t in TIME) I(t,p) is_continuous
+  forall(p in PO,  m in MACHINE) Y(p,m) is_binary
+  forall(p,pt in PO, m in MACHINE | p<>pt) SUCC(p,pt,m) is_binary
+  forall(p in PO,  m in MACHINE) ST(p,m) is_continuous
+  forall(p in PO,  m in MACHINE) ET(p,m) is_continuous
+  forall(p in POD, t in TIME) SL(t,p) is_continuous
+
+  !Define values via csv files
+  initializations from 'mmsheet.csv:Duration.csv'
+  DUR as "noindex;[A:B]"    ! Header in A1, data values starting in A2
+  end-initializations
+
+  initializations from 'mmsheet.csv:ChangeOver.csv'
+  CHNG as 'partndx;[A3:G11]'
+  end-initializations
+
+  initializations from 'mmsheet.csv:POQuantity.csv'
+  PO_QUANTITY as "noindex;[A1:A3]"    ! Header in A1, data values starting in A2
+  end-initializations
+
+
+!!!!!!!!!!!!!!!CONSTRAINTS!!!!!!!!!!!!!!!
+  !Each PO can only start on each machine only once
+  forall(p in PO, m in MACHINE) SUM(t in TIME) S(t,p,m) <=1
+
+  !Each PO can only end on each machine only once
+  forall(p in PO, m in MACHINE) SUM(t in TIME) E(t,p,m) <=1
+
+  !Each PO should pass one convertor
+  forall(p in PO) SUM(t in TIME, m in MACHINE_CONVERTER) S(t,p,m) =1
+
+  !Each PO should pass one packer
+  forall(p in PO) SUM(t in TIME, m in MACHINE_PACKING) S(t,p,m) =1
+
+  !Linking variable S and variable ST
+  forall(p in PO, m in MACHINE)  ST(p,m) = SUM(t in TIME) t * S(t,p,m)
+
+  !Linking variable E and variable ET
+  forall(p in PO, m in MACHINE)  ET(p,m) = SUM(t in TIME) t * E(t,p,m)
+
+  !Linking variable S and Z
+  forall(p in PO, m in MACHINE, t in TIME | t>1) Z(t,p,m) - Z(t-1,p,m) <= S(t,p,m)
+
+  !Linking variable E and Z
+  forall(p in PO, m in MACHINE, t in TIME | t>1) Z(t,p,m) - Z(t-1,p,m) >= -E(t-1,p,m)
+
+  !Each machine can only be doing one thing at a time
+  forall(t in TIME, m in MACHINE) SUM(p in PO) Z(t,p,m) <= 1
+
+  !Each machine can only be doing one thing at a time
+  forall(t in TIME, m in MACHINE) SUM(p in PO) S(t,p,m) <= 1
+
+  !Definition of Y and linking Y to S
+  forall(p in PO, m in MACHINE) Y(p,m) = SUM(t in TIME) S(t,p,m)
+
+  !Linking ST and ET
+  forall(p in PO, m in MACHINE) ET(p,m) >= ST(p,m) + (DUR(p,m)*Y(p,m))
+
+  !Each PO should have a predecessor
+  forall(pt in PO, m in MACHINE) SUM(p in PO | p<>pt) SUCC(p,pt,m) = SUM(p in PO | p<>pt) Y(p,m)
+
+  !Each PO should have a successor
+  !forall(p in PO, m in MACHINE) SUM(pt in PO | p<>pt) SUCC(p,pt,m) == 1 ! Temporary commented, to check whether needed
+
+  !Linking SUCC variable and ST, ET
+  !forall(p in PO, pt in PO, m in MACHINE | p<>pt) ST(pt,m) >= (ET(p,m)) + 1 - 500*(1-SUCC(p,pt,m))
+
+  !Starttime on buffer should be greater than endtime on converter
+  forall(p in PO) SUM(m_b in MACHINE_BUFFER) ST(p,m_b) >= SUM(m_c in MACHINE_CONVERTER) ET(p,m_c)
+
+  !Starttime on packing should be greater than endtime on buffer
+  forall(p in PO) SUM(m_p in MACHINE_PACKING) ST(p,m_p) >= SUM(m_b in MACHINE_BUFFER) ET(p,m_b)
+
+  !Inventory balance pod type 1
+  !forall(t in TIME | t>1) SUM(p in 1..2, m in MACHINE_CONVERTER) (E(t,p,m)*PO_QUANTITY(p)) + I(t-1,1) = I(t,1) + SUM(p in 1..2, m in MACHINE_PACKING) (S(t,p,m)*PO_QUANTITY(p))
+
+  !Inventory balance pod type 2
+  !forall(t in TIME | t>1) SUM(p in 1..1, m in MACHINE_CONVERTER) (E(t,p,m)*PO_QUANTITY(p)) + I(t-1,2) = I(t,2) + SUM(p in 1..1, m in MACHINE_PACKING) (S(t,p,m)*PO_QUANTITY(p))
+
+!!!!!!!!!!!!!!!OBJECTIVE FUNCTION!!!!!!!!!!!!!!!
+  Objective := SUM(m in MACHINE, p in PO, pt in PO | p<>pt) SUCC(p,pt,m)*CHNG(p,pt,m) + SUM(m in MACHINE, p in PO) ET(p,m) + SUM(t in TIME, s in POD) 80000*SL(t,s)
+
+!!!!!!!!!!!!!!!INITIALIZATIONS!!!!!!!!!!!!!!!
+  Z(1,1,1) = 1
+  S(1,1,1) = 1
+
+  setparam("XPRS_VERBOSE", true)
+
+  setparam("XPRS_LOADNAMES", true)
+  writeln("Begin running model")
+  minimize(Objective)
+  writeln("Solution: ", getobjval)
+
+  writeln("getprobstat: ", getprobstat)
+  forall(p in PO, m in MACHINE, t in TIME| exists(S(t,p,m)))
+      writeln("S: (",t,",",p,",",m,") :",getsol(S(t,p,m)))
+  forall(p in PO, m in MACHINE, t in TIME| exists(E(t,p,m)))
+    writeln("E: (",t,",",p,",",m,") :",getsol(E(t,p,m)))
+  forall(p in PO, m in MACHINE| exists(ST(p,m)))
+    writeln("ST: (",p,",",m,") :",getsol(ST(p,m)))
+  forall(p in PO, m in MACHINE| exists(ET(p,m)))
+      writeln("ET: (",p,",",m,") :",getsol(ET(p,m)))
+  forall(p in PO, m in MACHINE| exists(Y(p,m)))
+    writeln("Y: (",p,",",m,") :",getsol(Y(p,m)))
+  forall(p in PO, m in MACHINE, t in TIME| exists(Z(t,p,m)))
+    writeln("Z: (",t,",",p,",",m,") :",getsol(Z(t,p,m)))
+  forall(p in PO, pt in PO, m in MACHINE| exists(SUCC(pt,p,m)))
+    writeln("SUCC: (",p,",",pt,",",m,") :",getsol(SUCC(pt,p,m)))
+!  writeln("S: ", S)
+!  writeln("I: ", I)
+!  writeln("SUCC: ", SUCC)
+!  writeln("SL: ", SL)
+
+
+
+
+
+  writeln("End running model")
+end-model
